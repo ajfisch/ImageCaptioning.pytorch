@@ -16,6 +16,16 @@ from torch.autograd import *
 import misc.utils as utils
 
 
+def transfer(x):
+  if isinstance(x, list) or isinstance(x, tuple):
+    return [transfer(y) for y in x]
+  if isinstance(x, dict):
+    return {y: transfer(z) for y, z in x.items()}
+  if torch.is_tensor(x):
+    return x.cpu()
+  return x
+
+
 class CaptionModel(nn.Module):
     def __init__(self):
         super(CaptionModel, self).__init__()
@@ -51,7 +61,6 @@ class CaptionModel(nn.Module):
             #beam_seq : tensor containing the word indices of the decoded captions
             #beam_seq_logprobs : log-probability of each decision made, same size as beam_seq
             #beam_logprobs_sum : joint log-probability of each beam
-
             ys,ix = torch.sort(logprobsf,1,True)
             candidates = []
             cols = min(beam_size, ys.size(1))
@@ -66,7 +75,7 @@ class CaptionModel(nn.Module):
                     local_unaug_logprob = unaug_logprobsf[q,ix[q,c]]
                     candidates.append({'c':ix[q,c], 'q':q, 'p':candidate_logprob, 'r':local_unaug_logprob})
             candidates = sorted(candidates,  key=lambda x: -x['p'])
-            
+
             new_state = [_.clone() for _ in state]
             #beam_seq_prev, beam_seq_logprobs_prev
             if t >= 1:
@@ -98,9 +107,11 @@ class CaptionModel(nn.Module):
         bdash = beam_size // group_size # beam per group
 
         # INITIALIZATIONS
-        beam_seq_table = [torch.LongTensor(self.seq_length, bdash).zero_() for _ in range(group_size)]
-        beam_seq_logprobs_table = [torch.FloatTensor(self.seq_length, bdash).zero_() for _ in range(group_size)]
-        beam_logprobs_sum_table = [torch.zeros(bdash) for _ in range(group_size)]
+        # init_state = transfer(init_state)
+        # init_logprobs = init_logprobs.cpu()
+        beam_seq_table = [torch.LongTensor(self.seq_length, bdash).zero_().cuda() for _ in range(group_size)]
+        beam_seq_logprobs_table = [torch.FloatTensor(self.seq_length, bdash).zero_().cuda() for _ in range(group_size)]
+        beam_logprobs_sum_table = [torch.zeros(bdash).cuda() for _ in range(group_size)]
 
         # logprobs # logprobs predicted in last time step, shape (beam_size, vocab_size+1)
         done_beams_table = [[] for _ in range(group_size)]
@@ -114,12 +125,12 @@ class CaptionModel(nn.Module):
         args = [[args[i][j] for i in range(len(args))] for j in range(group_size)]
 
         for t in range(self.seq_length + group_size - 1):
-            for divm in range(group_size): 
+            for divm in range(group_size):
                 if t >= divm and t <= self.seq_length + divm - 1:
                     # add diversity
                     logprobsf = logprobs_table[divm].data.float()
                     # suppress UNK tokens in the decoding
-                    logprobsf[:,logprobsf.size(1)-1] = logprobsf[:, logprobsf.size(1)-1] - 1000  
+                    logprobsf[:,logprobsf.size(1)-1] = logprobsf[:, logprobsf.size(1)-1] - 1000
                     # diversity is added here
                     # the function directly modifies the logprobsf values and hence, we need to return
                     # the unaugmented ones for sorting the candidates in the end. # for historical
@@ -144,7 +155,7 @@ class CaptionModel(nn.Module):
                     for vix in range(bdash):
                         if beam_seq_table[divm][t-divm,vix] == 0 or t == self.seq_length + divm - 1:
                             final_beam = {
-                                'seq': beam_seq_table[divm][:, vix].clone(), 
+                                'seq': beam_seq_table[divm][:, vix].clone(),
                                 'logps': beam_seq_logprobs_table[divm][:, vix].clone(),
                                 'unaug_p': beam_seq_logprobs_table[divm][:, vix].sum(),
                                 'p': beam_logprobs_sum_table[divm][vix]
@@ -154,7 +165,7 @@ class CaptionModel(nn.Module):
                             beam_logprobs_sum_table[divm][vix] = -1000
 
                     # move the current group one step forward in time
-                    
+
                     it = beam_seq_table[divm][t-divm]
                     logprobs_table[divm], state_table[divm] = self.get_logprobs_state(Variable(it.cuda()), *(args[divm] + [state_table[divm]]))
 
