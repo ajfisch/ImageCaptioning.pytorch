@@ -19,10 +19,9 @@ from __future__ import print_function
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.autograd import *
-import misc.utils as utils
 
 from .CaptionModel import CaptionModel
+
 
 class AttModel(CaptionModel):
     def __init__(self, opt):
@@ -54,8 +53,8 @@ class AttModel(CaptionModel):
 
     def init_hidden(self, bsz):
         weight = next(self.parameters()).data
-        return (Variable(weight.new(self.num_layers, bsz, self.rnn_size).zero_()),
-                Variable(weight.new(self.num_layers, bsz, self.rnn_size).zero_()))
+        return (weight.new(self.num_layers, bsz, self.rnn_size).zero_(),
+                weight.new(self.num_layers, bsz, self.rnn_size).zero_())
 
     def forward(self, fc_feats, att_feats, seq):
         batch_size = fc_feats.size(0)
@@ -85,9 +84,8 @@ class AttModel(CaptionModel):
                     #it.index_copy_(0, sample_ind, torch.multinomial(prob_prev, 1).view(-1))
                     prob_prev = torch.exp(outputs[-1].data) # fetch prev distribution: shape Nx(M+1)
                     it.index_copy_(0, sample_ind, torch.multinomial(prob_prev, 1).view(-1).index_select(0, sample_ind))
-                    it = Variable(it, requires_grad=False)
             else:
-                it = seq[:, i].clone()          
+                it = seq[:, i].clone()
             # break if all the sequences end
             if i >= 1 and seq[:, i].data.sum() == 0:
                 break
@@ -95,17 +93,16 @@ class AttModel(CaptionModel):
             xt = self.embed(it)
 
             output, state = self.core(xt, fc_feats, att_feats, p_att_feats, state)
-            output = F.log_softmax(self.logit(output))
+            output = F.log_softmax(self.logit(output), dim=-1)
             outputs.append(output)
 
         return torch.cat([_.unsqueeze(1) for _ in outputs], 1)
 
     def get_logprobs_state(self, it, tmp_fc_feats, tmp_att_feats, tmp_p_att_feats, state):
-        # 'it' is Variable contraining a word index
         xt = self.embed(it)
 
         output, state = self.core(xt, tmp_fc_feats, tmp_att_feats, tmp_p_att_feats, state)
-        logprobs = F.log_softmax(self.logit(output))
+        logprobs = F.log_softmax(self.logit(output), dim=-1)
 
         return logprobs, state
 
@@ -137,10 +134,10 @@ class AttModel(CaptionModel):
             for t in range(1):
                 if t == 0: # input <bos>
                     it = fc_feats.data.new(beam_size).long().zero_()
-                    xt = self.embed(Variable(it, requires_grad=False))
+                    xt = self.embed(it)
 
                 output, state = self.core(xt, tmp_fc_feats, tmp_att_feats, tmp_p_att_feats, state)
-                logprobs = F.log_softmax(self.logit(output))
+                logprobs = F.log_softmax(self.logit(output), dim=-1)
 
             self.done_beams[k] = self.beam_search(state, logprobs, tmp_fc_feats, tmp_att_feats, tmp_p_att_feats, opt=opt)
             seq[:, k] = self.done_beams[k][0]['seq'] # the first beam has highest cumulative score
@@ -182,10 +179,10 @@ class AttModel(CaptionModel):
                     # scale logprobs by temperature
                     prob_prev = torch.exp(torch.div(logprobs.data, temperature)).cpu()
                 it = torch.multinomial(prob_prev, 1).cuda()
-                sampleLogprobs = logprobs.gather(1, Variable(it, requires_grad=False)) # gather the logprobs at sampled positions
+                sampleLogprobs = logprobs.gather(1, it) # gather the logprobs at sampled positions
                 it = it.view(-1).long() # and flatten indices for downstream processing
 
-            xt = self.embed(Variable(it, requires_grad=False))
+            xt = self.embed(it)
 
             if t >= 1:
                 # stop when all finished
@@ -201,9 +198,10 @@ class AttModel(CaptionModel):
                 seqLogprobs.append(sampleLogprobs.view(-1))
 
             output, state = self.core(xt, fc_feats, att_feats, p_att_feats, state)
-            logprobs = F.log_softmax(self.logit(output))
+            logprobs = F.log_softmax(self.logit(output), dim=-1)
 
         return torch.cat([_.unsqueeze(1) for _ in seq], 1), torch.cat([_.unsqueeze(1) for _ in seqLogprobs], 1)
+
 
 class AdaAtt_lstm(nn.Module):
     def __init__(self, opt, use_maxout=True):
@@ -234,7 +232,6 @@ class AdaAtt_lstm(nn.Module):
             self.r_i2h = nn.Linear(self.rnn_size, self.rnn_size)
         self.r_h2h = nn.Linear(self.rnn_size, self.rnn_size)
 
-
     def forward(self, xt, img_fc, state):
 
         hs = []
@@ -255,14 +252,14 @@ class AdaAtt_lstm(nn.Module):
             all_input_sums = i2h+self.h2h[L](prev_h)
 
             sigmoid_chunk = all_input_sums.narrow(1, 0, 3 * self.rnn_size)
-            sigmoid_chunk = F.sigmoid(sigmoid_chunk)
+            sigmoid_chunk = torch.sigmoid(sigmoid_chunk)
             # decode the gates
             in_gate = sigmoid_chunk.narrow(1, 0, self.rnn_size)
             forget_gate = sigmoid_chunk.narrow(1, self.rnn_size, self.rnn_size)
             out_gate = sigmoid_chunk.narrow(1, self.rnn_size * 2, self.rnn_size)
             # decode the write inputs
             if not self.use_maxout:
-                in_transform = F.tanh(all_input_sums.narrow(1, 3 * self.rnn_size, self.rnn_size))
+                in_transform = torch.tanh(all_input_sums.narrow(1, 3 * self.rnn_size, self.rnn_size))
             else:
                 in_transform = all_input_sums.narrow(1, 3 * self.rnn_size, 2 * self.rnn_size)
                 in_transform = torch.max(\
@@ -271,7 +268,7 @@ class AdaAtt_lstm(nn.Module):
             # perform the LSTM update
             next_c = forget_gate * prev_c + in_gate * in_transform
             # gated cells form the output
-            tanh_nex_c = F.tanh(next_c)
+            tanh_nex_c = torch.tanh(next_c)
             next_h = out_gate * tanh_nex_c
             if L == self.num_layers-1:
                 if L == 0:
@@ -279,7 +276,7 @@ class AdaAtt_lstm(nn.Module):
                 else:
                     i2h = self.r_i2h(x)
                 n5 = i2h+self.r_h2h(prev_h)
-                fake_region = F.sigmoid(n5) * tanh_nex_c
+                fake_region = torch.sigmoid(n5) * tanh_nex_c
 
             cs.append(next_c)
             hs.append(next_h)
@@ -289,9 +286,10 @@ class AdaAtt_lstm(nn.Module):
         top_h = F.dropout(top_h, self.drop_prob_lm, self.training)
         fake_region = F.dropout(fake_region, self.drop_prob_lm, self.training)
 
-        state = (torch.cat([_.unsqueeze(0) for _ in hs], 0), 
-                torch.cat([_.unsqueeze(0) for _ in cs], 0))
+        state = (torch.cat([_.unsqueeze(0) for _ in hs], 0),
+                 torch.cat([_.unsqueeze(0) for _ in cs], 0))
         return top_h, fake_region, state
+
 
 class AdaAtt_attention(nn.Module):
     def __init__(self, opt):
@@ -305,14 +303,14 @@ class AdaAtt_attention(nn.Module):
         # fake region embed
         self.fr_linear = nn.Sequential(
             nn.Linear(self.rnn_size, self.input_encoding_size),
-            nn.ReLU(), 
+            nn.ReLU(),
             nn.Dropout(self.drop_prob_lm))
         self.fr_embed = nn.Linear(self.input_encoding_size, self.att_hid_size)
 
         # h out embed
         self.ho_linear = nn.Sequential(
             nn.Linear(self.rnn_size, self.input_encoding_size),
-            nn.Tanh(), 
+            nn.Tanh(),
             nn.Dropout(self.drop_prob_lm))
         self.ho_embed = nn.Linear(self.input_encoding_size, self.att_hid_size)
 
@@ -338,20 +336,21 @@ class AdaAtt_attention(nn.Module):
         img_all = torch.cat([fake_region.view(-1,1,self.input_encoding_size), conv_feat], 1)
         img_all_embed = torch.cat([fake_region_embed.view(-1,1,self.input_encoding_size), conv_feat_embed], 1)
 
-        hA = F.tanh(img_all_embed + txt_replicate)
+        hA = torch.tanh(img_all_embed + txt_replicate)
         hA = F.dropout(hA,self.drop_prob_lm, self.training)
-        
+
         hAflat = self.alpha_net(hA.view(-1, self.att_hid_size))
-        PI = F.softmax(hAflat.view(-1, att_size + 1))
+        PI = F.softmax(hAflat.view(-1, att_size + 1), dim=-1)
 
         visAtt = torch.bmm(PI.unsqueeze(1), img_all)
         visAttdim = visAtt.squeeze(1)
 
         atten_out = visAttdim + h_out_linear
 
-        h = F.tanh(self.att2h(atten_out))
+        h = torch.tanh(self.att2h(atten_out))
         h = F.dropout(h, self.drop_prob_lm, self.training)
         return h
+
 
 class AdaAttCore(nn.Module):
     def __init__(self, opt, use_maxout=False):
@@ -363,6 +362,7 @@ class AdaAttCore(nn.Module):
         h_out, p_out, state = self.lstm(xt, fc_feats, state)
         atten_out = self.attention(h_out, p_out, att_feats, p_att_feats)
         return atten_out, state
+
 
 class TopDownCore(nn.Module):
     def __init__(self, opt, use_maxout=False):
@@ -391,6 +391,7 @@ class TopDownCore(nn.Module):
 
         return output, state
 
+
 class Attention(nn.Module):
     def __init__(self, opt):
         super(Attention, self).__init__()
@@ -404,16 +405,16 @@ class Attention(nn.Module):
         # The p_att_feats here is already projected
         att_size = att_feats.numel() // att_feats.size(0) // self.rnn_size
         att = p_att_feats.view(-1, att_size, self.att_hid_size)
-        
+
         att_h = self.h2att(h)                        # batch * att_hid_size
         att_h = att_h.unsqueeze(1).expand_as(att)            # batch * att_size * att_hid_size
         dot = att + att_h                                   # batch * att_size * att_hid_size
-        dot = F.tanh(dot)                                # batch * att_size * att_hid_size
+        dot = torch.tanh(dot)                                # batch * att_size * att_hid_size
         dot = dot.view(-1, self.att_hid_size)               # (batch * att_size) * att_hid_size
         dot = self.alpha_net(dot)                           # (batch * att_size) * 1
         dot = dot.view(-1, att_size)                        # batch * att_size
-        
-        weight = F.softmax(dot)                             # batch * att_size
+
+        weight = F.softmax(dot, dim=-1)                             # batch * att_size
         att_feats_ = att_feats.view(-1, att_size, self.rnn_size) # batch * att_size * att_feat_size
         att_res = torch.bmm(weight.unsqueeze(1), att_feats_).squeeze(1) # batch * att_feat_size
 
@@ -431,7 +432,7 @@ class Att2in2Core(nn.Module):
         self.fc_feat_size = opt.fc_feat_size
         self.att_feat_size = opt.att_feat_size
         self.att_hid_size = opt.att_hid_size
-        
+
         # Build a LSTM
         self.a2c = nn.Linear(self.rnn_size, 2 * self.rnn_size)
         self.i2h = nn.Linear(self.input_encoding_size, 5 * self.rnn_size)
@@ -445,7 +446,7 @@ class Att2in2Core(nn.Module):
 
         all_input_sums = self.i2h(xt) + self.h2h(state[0][-1])
         sigmoid_chunk = all_input_sums.narrow(1, 0, 3 * self.rnn_size)
-        sigmoid_chunk = F.sigmoid(sigmoid_chunk)
+        sigmoid_chunk = torch.sigmoid(sigmoid_chunk)
         in_gate = sigmoid_chunk.narrow(1, 0, self.rnn_size)
         forget_gate = sigmoid_chunk.narrow(1, self.rnn_size, self.rnn_size)
         out_gate = sigmoid_chunk.narrow(1, self.rnn_size * 2, self.rnn_size)
@@ -456,16 +457,18 @@ class Att2in2Core(nn.Module):
             in_transform.narrow(1, 0, self.rnn_size),
             in_transform.narrow(1, self.rnn_size, self.rnn_size))
         next_c = forget_gate * state[1][-1] + in_gate * in_transform
-        next_h = out_gate * F.tanh(next_c)
+        next_h = out_gate * torch.tanh(next_c)
 
         output = self.dropout(next_h)
         state = (next_h.unsqueeze(0), next_c.unsqueeze(0))
         return output, state
 
+
 class AdaAttModel(AttModel):
     def __init__(self, opt):
         super(AdaAttModel, self).__init__(opt)
         self.core = AdaAttCore(opt)
+
 
 # AdaAtt with maxout lstm
 class AdaAttMOModel(AttModel):
@@ -473,12 +476,14 @@ class AdaAttMOModel(AttModel):
         super(AdaAttMOModel, self).__init__(opt)
         self.core = AdaAttCore(opt, True)
 
+
 class Att2in2Model(AttModel):
     def __init__(self, opt):
         super(Att2in2Model, self).__init__(opt)
         self.core = Att2in2Core(opt)
         delattr(self, 'fc_embed')
         self.fc_embed = lambda x : x
+
 
 class TopDownModel(AttModel):
     def __init__(self, opt):

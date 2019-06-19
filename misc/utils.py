@@ -2,10 +2,45 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-import collections
+import os
 import torch
 import torch.nn as nn
-from torch.autograd import Variable
+import tensorflow as tf
+import tempfile
+from six.moves import cPickle as pickle
+
+
+def torch_save(obj, path):
+    local_path = tempfile.NamedTemporaryFile(delete=False).name
+    torch.save(obj.cpu(), local_path)
+    tf.gfile.Copy(local_path, path, overwrite=True)
+    os.remove(local_path)
+
+
+def torch_load(path):
+    local_path = tempfile.NamedTemporaryFile(delete=False).name
+    tf.gfile.Copy(path, local_path, overwrite=True)
+    obj = torch.load(local_path, map_location=torch.device('cpu'))
+    os.remove(local_path)
+    return obj
+
+
+def pickle_save(obj, path, bytes=False):
+    local_path = tempfile.NamedTemporaryFile(delete=False).name
+    with open(local_path, 'wb' if bytes else 'w') as f:
+        pickle.dump(obj, f)
+    tf.gfile.Copy(local_path, path, overwrite=True)
+    os.remove(local_path)
+
+
+def pickle_load(path, bytes=False):
+    local_path = tempfile.NamedTemporaryFile(delete=False).name
+    tf.gfile.Copy(path, local_path, overwrite=True)
+    with open(local_path, 'rb' if bytes else 'r') as f:
+        obj = pickle.load(f)
+    os.remove(local_path)
+    return obj
+
 
 def if_use_att(caption_model):
     # Decide if load attention feature according to caption model
@@ -13,8 +48,9 @@ def if_use_att(caption_model):
         return False
     return True
 
-# Input: seq, N*D numpy array, with element 0 .. vocab_size. 0 is END token.
+
 def decode_sequence(ix_to_word, seq):
+    # Input: seq, N*D numpy array, with element 0 .. vocab_size. 0 is END token.
     N, D = seq.size()
     out = []
     for i in range(N):
@@ -30,11 +66,13 @@ def decode_sequence(ix_to_word, seq):
         out.append(txt)
     return out
 
+
 def to_contiguous(tensor):
     if tensor.is_contiguous():
         return tensor
     else:
         return tensor.contiguous()
+
 
 class LanguageModelCriterion(nn.Module):
     def __init__(self):
@@ -52,9 +90,11 @@ class LanguageModelCriterion(nn.Module):
 
         return output
 
+
 def set_lr(optimizer, lr):
     for group in optimizer.param_groups:
         group['lr'] = lr
+
 
 def clip_gradient(optimizer, grad_clip):
     for group in optimizer.param_groups:

@@ -11,19 +11,6 @@ from __future__ import print_function
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from torch.autograd import *
-import misc.utils as utils
-
-
-def transfer(x):
-  if isinstance(x, list) or isinstance(x, tuple):
-    return [transfer(y) for y in x]
-  if isinstance(x, dict):
-    return {y: transfer(z) for y, z in x.items()}
-  if torch.is_tensor(x):
-    return x.cpu()
-  return x
 
 
 class CaptionModel(nn.Module):
@@ -35,6 +22,7 @@ class CaptionModel(nn.Module):
     # augments log-probabilities with diversity terms when number of groups > 1
 
     def beam_search(self, init_state, init_logprobs, *args, **kwargs):
+        device = init_logprobs.device
 
         # function computes the similarity score to be augmented
         def add_diversity(beam_seq_table, logprobsf, t, divm, diversity_lambda, bdash):
@@ -107,13 +95,10 @@ class CaptionModel(nn.Module):
         bdash = beam_size // group_size # beam per group
 
         # INITIALIZATIONS
-        # init_state = transfer(init_state)
-        # init_logprobs = init_logprobs.cpu()
-        beam_seq_table = [torch.LongTensor(self.seq_length, bdash).zero_().cuda() for _ in range(group_size)]
-        beam_seq_logprobs_table = [torch.FloatTensor(self.seq_length, bdash).zero_().cuda() for _ in range(group_size)]
-        beam_logprobs_sum_table = [torch.zeros(bdash).cuda() for _ in range(group_size)]
+        beam_seq_table = [torch.LongTensor(self.seq_length, bdash).zero_().to(device) for _ in range(group_size)]
+        beam_seq_logprobs_table = [torch.FloatTensor(self.seq_length, bdash).zero_().to(device) for _ in range(group_size)]
+        beam_logprobs_sum_table = [torch.zeros(bdash).to(device) for _ in range(group_size)]
 
-        # logprobs # logprobs predicted in last time step, shape (beam_size, vocab_size+1)
         done_beams_table = [[] for _ in range(group_size)]
         state_table = [list(torch.unbind(_)) for _ in torch.stack(init_state).chunk(group_size, 2)]
         logprobs_table = list(init_logprobs.chunk(group_size, 0))
@@ -167,7 +152,7 @@ class CaptionModel(nn.Module):
                     # move the current group one step forward in time
 
                     it = beam_seq_table[divm][t-divm]
-                    logprobs_table[divm], state_table[divm] = self.get_logprobs_state(Variable(it.cuda()), *(args[divm] + [state_table[divm]]))
+                    logprobs_table[divm], state_table[divm] = self.get_logprobs_state(it, *(args[divm] + [state_table[divm]]))
 
         # all beams are sorted by their log-probabilities
         done_beams_table = [sorted(done_beams_table[i], key=lambda x: -x['p'])[:bdash] for i in range(group_size)]
